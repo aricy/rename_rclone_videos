@@ -173,15 +173,12 @@ def extract_tv_title_from_brackets(folder_name):
     # 1. 优先提取第一个中括号/花括号/中文括号内的内容（如有）
     match = re.search(r'^[\[\(【{（《](.*?)[\]）】】》)]', folder_name)
     if match:
-        print("xxx0", folder_name)
         return match.group(1).strip()
 
     # 2. 如果是中文开头，只取空格前内容
     if re.match(r'^[\u4e00-\u9fa5]', folder_name):
-        print("xxx1", folder_name)
         return re.sub(r'[（(【{\\[].*?[）)】}\\]]', '', folder_name.split(' ')[0].strip()).strip()
 
-    print("xxx2", folder_name)
     # 3. 否则返回完整英文目录名（含空格）
     return folder_name.strip()
 
