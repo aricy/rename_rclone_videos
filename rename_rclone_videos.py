@@ -65,110 +65,104 @@ def list_files(remote, base_dir):
 
 # === TV 处理逻辑 ===
 def extract_episode_info(filename, default_season=1):
+    """
+    返回：
+      season(int), episode(int), title(str), ext(str),
+      season_raw(str|None), episode_raw(str|None)
+    season_raw/episode_raw：只有当文件名里原生出现 SxEy / 1x01 / Ep01 时才会返回原始字符串，
+    供后续“保持原样，不再补0”的需求使用。
+    """
     ext = filename.rsplit('.', 1)[-1] if '.' in filename else ''
     stem = filename.rsplit('.', 1)[0]
-    
+
     # 1. SxxEyy or SxxEyy-Ezz
     match = re.search(r'(?i)s(\d{1,3})e(\d{1,4})(?:-?e?(\d{1,4}))?', filename)
     if match:
-        season = int(match.group(1))
-        episode = int(match.group(2))
+        season_raw = match.group(1)
+        episode_raw = match.group(2)
+        season = int(season_raw)
+        episode = int(episode_raw)
         title = filename[match.end():].rsplit('.', 1)[0].strip('. -_')
-        return season, episode, title, ext
-        
+        return season, episode, title, ext, season_raw, episode_raw
+
     # 2. 1x01
     match = re.search(r'(\d{1,3})[xX](\d{1,4})', filename)
     if match:
-        season = int(match.group(1))
-        episode = int(match.group(2))
+        season_raw = match.group(1)
+        episode_raw = match.group(2)
+        season = int(season_raw)
+        episode = int(episode_raw)
         title = filename[match.end():].rsplit('.', 1)[0].strip('. -_')
-        return season, episode, title, ext
+        return season, episode, title, ext, season_raw, episode_raw
 
     # 3. Ep.01 / Episode 01
     match = re.search(r'(?i)ep(?:isode)?\.?\s*(\d{1,4})', filename)
     if match:
+        episode_raw = match.group(1)
+        season_raw = str(default_season)  # 季来自默认季（不补0）
         season = default_season
-        episode = int(match.group(1))
+        episode = int(episode_raw)
         title = filename[match.end():].rsplit('.', 1)[0].strip('. -_')
-        return season, episode, title, ext
+        return season, episode, title, ext, season_raw, episode_raw
 
     # 4. "01 Title" or "01.Title" (Start of line)
     # Exclude years (19xx, 20xx)
     match = re.match(r'^(\d{1,3})[\s._-]+(.+)$', stem)
     if match:
         val = int(match.group(1))
-        if val < 1900: 
-            return default_season, val, match.group(2).strip(), ext
+        if val < 1900:
+            # 这里是“推断出来的集号”，不算原生标准格式 -> 后续需要补到4位
+            return default_season, val, match.group(2).strip(), ext, None, None
 
     # 5. "第01话" or "第01集"
     match = re.match(r'^第(\d{1,4})[话集]\s*(.*)$', stem)
     if match:
-        return default_season, int(match.group(1)), match.group(2).strip(), ext
-             
+        return default_season, int(match.group(1)), match.group(2).strip(), ext, None, None
+
     # 6. Just a number "01"
     if re.match(r'^\d{1,3}$', stem):
         val = int(stem)
         if val < 1900:
-             return default_season, val, '', ext
+            return default_season, val, '', ext, None, None
 
-    return None, None, None, None
+    return None, None, None, None, None, None
 
 def clean_episode_title(title):
-    if not title: return ''
+    if not title:
+        return ''
     # Remove checksums like [A1B2C3D4]
     title = re.sub(r'\[[0-9A-Fa-f]{8}\]', '', title)
-    
-    # Common technical tags
-    # Added H.265 support, 2Audio, etc
+
     tags_list = [
-        r'1080p', r'720p', r'2160p', r'4k', 
+        r'1080p', r'720p', r'2160p', r'4k',
         r'x264', r'x265', r'h.?265', r'hevc', r'avc',
         r'aac', r'ac3', r'dts', r'web-dl', r'bluray', r'remux', r'hq',
         r'2audio', r'h.?264', r'dd5.?1', r'uhd'
     ]
-    # Join with |
     tags = '|'.join(tags_list)
-    
+
     # 1. Remove [tag] or (tag)
     title = re.sub(r'(?i)[\[\(]\s*(?:' + tags + r')\s*[\]\)]', '', title)
-    
-    # 2. Remove tags that are surrounded by separators or boundaries
-    # Using specific lookarounds or non-capturing groups to ensure we match "dot-tag-dot" or "space-tag-space"
-    # To handle "H.265", we need to be careful. The regex "h.?265" covers H.265 or H265.
-    
-    # Strategy: Replace all separators (., _, -) with spaces temporarily to safely identify words
-    # Then remove the words that are technical tags
-    # Then collapse spaces and maybe restore dots if needed, but usually we want Clean Title
-    
-    # Let's try a safer regex approach:
-    # Match boundary or separator + tag + boundary or separator
-    
-    # Iterate to remove all occurrences
+
+    # 2. Remove tags surrounded by separators/boundaries (iterative)
     while True:
-        # Match tag surrounded by non-word chars or start/end
-        # We use a broad separator match [.\-_ ]
         prev_len = len(title)
         title = re.sub(r'(?i)(?:^|[.\-_ ])(?:' + tags + r')(?:$|[.\-_ ])', '.', title)
-        # Also handle tags combined like "H.265.AAC" -> we might need multiple passes or better alignment
-        
-        # Cleanup separators after substitution
         title = re.sub(r'[.\-_ ]{2,}', '.', title)
-        
         if len(title) == prev_len:
             break
-            
+
     # 3. Cleanup empty brackets
     title = re.sub(r'\[\s*\]', '', title)
     title = re.sub(r'\(\s*\)', '', title)
-    
-    # 3.5. Remove redundant "Episode X" info from title content
-    # matches: "第 2 集", "Ep 2", "Episode 2"
+
+    # 3.5. Remove redundant "Episode X" info
     title = re.sub(r'(?i)(?:^|[.\-_ ])第\s*\d+\s*[集话部](?:$|[.\-_ ])', '.', title)
     title = re.sub(r'(?i)(?:^|[.\-_ ])(?:ep|episode)\s*\d+(?:$|[.\-_ ])', '.', title)
-    
+
     # 4. Collapse separators again and strip
     title = re.sub(r'[.\-_ ]{2,}', '.', title)
-    
+
     # 5. Final strip
     return title.strip('. -_')
 
@@ -181,9 +175,6 @@ def process_tv_file_list_in_dir(remote, base_dir, file_list):
             continue
         if len(path_parts) == 3:
             middle = path_parts[-2]
-            # Relaxed check: allow "Season X", "Sx", "第 x 季"
-            # Or just check if it LOOKS like a season folder
-            # If it contains "Season" or starts with "S" digit or "第" digit
             if not re.search(r'(?i)(season|s\d|第\s*\d+\s*[季部])', middle.strip()):
                 log(f"[{remote}] 跳过非 Season/Sx 的三层路径: {f}")
                 continue
@@ -205,10 +196,10 @@ def process_tv_file_list_in_dir(remote, base_dir, file_list):
             season_number = 1
 
         folder = extract_tv_title_from_brackets(folder)   # 精准提取 SUMMER NUDE
-        episode, title, ext = None, '', ''
-        # ✅ 下方统一逻辑
-        season_number, episode, title, ext = extract_episode_info(filename, season_number)
-        
+
+        # ✅ 修改点：多接收 season_raw / episode_raw，用于“如果已是标准格式则不再补0”
+        season_number, episode, title, ext, season_raw, episode_raw = extract_episode_info(filename, season_number)
+
         if title:
             title = clean_episode_title(title)
 
@@ -216,7 +207,13 @@ def process_tv_file_list_in_dir(remote, base_dir, file_list):
             log(f"[{remote}] 跳过未识别集数: {f}")
             continue
 
-        sxe = f"S{season_number:02d}E{episode:04d}"
+        # ✅ 修改点：若原文件名里本就出现 SxEy / 1x01 / Ep01，则保持原始位数
+        if season_raw is not None and episode_raw is not None:
+            sxe = f"S{season_raw}E{episode_raw}"
+        else:
+            # 否则（推断集号）才补齐 E 到 4 位
+            sxe = f"S{season_number:02d}E{episode:04d}"
+
         new_filename = f"{folder}.{sxe}.{title}.{ext}" if title else f"{folder}.{sxe}.{ext}"
         new_path = f"{remote}:{base_dir}/{'/'.join(path_parts[:-1])}/{new_filename}"
 
@@ -272,12 +269,8 @@ def is_loose_prefix(name, title):
     return name_clean.startswith(title_clean)
 
 def process_movie_file_list_in_dir(remote, base_dir, file_list):
-    # Check if this looks like a collection (multiple video files)
-    # If so, we should arguably NOT rename the files to match the folder, 
-    # as that would overwrite unique suffixes (like "Kung Fu Panda 1", "Kung Fu Panda 2")
-    # with just "Kung Fu Panda Collection.mkv" (or introduce conflict).
     is_collection = len(file_list) > 1
-    
+
     for f in file_list:
         if not f.lower().endswith(VIDEO_EXTS):
             continue
@@ -299,40 +292,24 @@ def process_movie_file_list_in_dir(remote, base_dir, file_list):
 
         clean_name = extract_title_from_brackets(folder_name)
         new_filename = f"{folder_name}.{ext}"
-        
-        # If we found a cleaner name from brackets (e.g. [Title]... -> Title), use it
+
         if clean_name:
-            # Enforce dot format: "Kung Fu Panda 1-4" -> "Kung.Fu.Panda.1-4"
             clean_name = re.sub(r'\s+', '.', clean_name)
             new_filename = f"{clean_name}.{ext}"
-        
-        # If no clean name found, continue with checks
         else:
-             if name == folder_name:
-                 log(f"[{remote}] 跳过：文件名与目录名完全一致 → {f}")
-                 continue
+            if name == folder_name:
+                log(f"[{remote}] 跳过：文件名与目录名完全一致 → {f}")
+                continue
 
-             if is_collection:
-                 # Collection Mode: Do NOT rename to folder name.
-                 # Only strictly clean the filename if needed, or skip.
-                 # If we rename "Kung Fu Panda 1.mkv" to "Kung Fu Panda Collection.mkv", it's bad.
-                 # So we skip the "Folder Name" rename logic entirely.
-                 # We could apply clean_episode_title logic to the filename itself?
-                 # For now, let's just log skipping to be safe and avoid destruction.
-                 log(f"[{remote}] 跳过合集文件夹内的重命名 (防止覆盖): {f}")
-                 continue
+            if is_collection:
+                log(f"[{remote}] 跳过合集文件夹内的重命名 (防止覆盖): {f}")
+                continue
 
-             if is_prefixed_by(name, folder_name):
-                 log(f"[{remote}] 跳过：文件名以目录名为前缀 → {f}")
-                 continue
+            if is_prefixed_by(name, folder_name):
+                log(f"[{remote}] 跳过：文件名以目录名为前缀 → {f}")
+                continue
 
-             title_candidate = extract_title_from_brackets(folder_name) # This matches logic above but logic above is strict now
-             # Actually `clean_name` is the strict one.
-             # We might still want "is_prefixed_by" logic?
-             # If `clean_name` is set, we skip these checks because we WANT to rename to `clean_name`.
-
-        # Special Check: if new filename matches old filename (case insensitive perhaps?)
-        # Just trust existing `old_path == new_path` check at end of loop.
+            title_candidate = extract_title_from_brackets(folder_name)
 
         new_path = f"{remote}:{base_dir}/{folder_name}/{new_filename}"
         if old_path == new_path:
